@@ -115,6 +115,7 @@ class BiasedMNIST(MNIST):
         """Build biased MNIST.
         """
         n_labels = self.targets.max().item() + 1
+        # n_labels = 10
 
         bias_indices = {label: torch.LongTensor() for label in range(n_labels)}
         for label in range(n_labels):

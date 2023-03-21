@@ -1,3 +1,6 @@
 __pycache__
 wandb
 src/wandb
+errors
+outputs
+*.csv
