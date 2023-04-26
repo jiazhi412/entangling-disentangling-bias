@@ -4,18 +4,24 @@ import numpy as np
 import random
 import os
 import argparse
-import dataloader.CMNIST as CMNIST
+from dataloader.Diabetes_I import DiabetesDataset_I
+from dataloader.Diabetes_II import DiabetesDataset_II
+from dataloader.Diabetes import DiabetesDataset 
+import datetime
 
 from EnD import *
 from collections import defaultdict
 import models
 from tqdm import tqdm
+import utils
+import torch.nn.functional as F
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def num_correct(outputs,labels):
-    _, preds = torch.max(outputs, dim=1)
-    correct = preds.eq(labels).sum()
+    outputs = F.sigmoid(outputs)
+    correct = (outputs.round() == labels).sum()
+    # print(correct)
     return correct
 
 def train(model, dataloader, criterion, weights, optimizer, scheduler):
@@ -32,7 +38,7 @@ def train(model, dataloader, criterion, weights, optimizer, scheduler):
         optimizer.zero_grad()
         with torch.enable_grad():
             outputs = model(data)
-        bce, abs = criterion(outputs, labels, color_labels, weights)
+        bce, abs = criterion(outputs, labels.float(), color_labels.float(), weights)
         loss = bce+abs
         loss.backward()
         optimizer.step()
@@ -57,67 +63,97 @@ def test(model, dataloader, criterion, weights):
     tot_loss = 0
 
     model.eval()
-
+    output_list = []
+    target_list = []
+    a_list = []
     for data, labels, color_labels in tqdm(dataloader, leave=False):
         data, labels, color_labels = data.to(device), labels.to(device), color_labels.to(device)
 
         with torch.no_grad():
             outputs = model(data)
-        loss = criterion(outputs, labels, color_labels, weights)
+            # print(outputs)
+        loss = criterion(outputs, labels.float(), color_labels.float(), weights)
 
         batch_size = data.shape[0]
         tot_correct += num_correct(outputs, labels).item()
         num_samples += batch_size
+        # print(tot_correct)
+        # print(num_samples)
+        # print('daj')
         tot_loss += loss.item() * batch_size
 
+        output_list.append(outputs)
+        target_list.append(labels)
+        a_list.append(color_labels)
+
+    test_output, test_target, test_a = torch.cat(output_list), torch.cat(target_list), torch.cat(a_list)
+    test_acc_p, test_acc_n = utils.compute_subAcc_withlogits_binary(test_output, test_target, test_a)
+    D = test_acc_p - test_acc_n
     avg_accuracy = tot_correct / num_samples
     avg_loss = tot_loss / num_samples
-    return avg_accuracy, avg_loss
+    return avg_accuracy, avg_loss, test_acc_p, test_acc_n, D
 
 def main(config):
-    seed = 42
-    random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    np.random.seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.manual_seed(seed)
+    # seed = 42
+    # random.seed(seed)
+    # os.environ["PYTHONHASHSEED"] = str(seed)
+    # np.random.seed(seed)
+    # torch.cuda.manual_seed(seed)
+    # torch.cuda.manual_seed_all(seed)
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
+    # torch.manual_seed(seed)
 
-    custom_loader = CMNIST.WholeDataLoader(config, istrain=True)
-    train_loader = torch.utils.data.DataLoader(custom_loader,
+
+    opt = vars(config)
+    
+    print('Note', 'YoungP', 'YoungN', 'OldP', 'OldN')
+    # imbalance 
+    if opt['bias_type'] == 'I':
+        # split 80% for train and 20% for test
+        print("Train")
+        train_set = DiabetesDataset_I(path=opt['load_path'], quick_load=True, bias_attr=opt['bias_attr'], middle_age=0, 
+                    minority=opt['minority'], minority_size=opt['minority_size'], mode='train')
+        print("Test")
+        test_set = DiabetesDataset_I(path=opt['load_path'], quick_load=True, bias_attr=opt['bias_attr'], middle_age=0, 
+                    minority=None, mode='test', balance=True, idx=train_set.get_idx())
+        dev_set = test_set
+
+    # association
+    elif opt['bias_type'] == 'II':
+        print("Train")
+        train_set = DiabetesDataset_II(path=opt['load_path'], quick_load=True, bias_attr=opt['bias_attr'], middle_age=0, 
+                    mode=opt['Diabetes_train_mode'])
+        print("Val")
+        dev_set = DiabetesDataset_II(path=opt['load_path'], quick_load=True, bias_attr=opt['bias_attr'], middle_age=0, 
+                    mode=opt['Diabetes_test_mode'], idx=train_set.get_idx())
+        print("Test")
+        test_set = DiabetesDataset_II(path=opt['load_path'], quick_load=True, bias_attr=opt['bias_attr'], middle_age=0, 
+                    mode=opt['Diabetes_test_mode'], idx=train_set.get_idx())
+
+    train_loader = torch.utils.data.DataLoader(train_set,
                                                   batch_size=config.batch_size,
                                                   shuffle=True,
                                                   num_workers=config.num_workers, pin_memory=True)
-    valid_loader = torch.utils.data.DataLoader(custom_loader,
+    valid_loader = torch.utils.data.DataLoader(test_set,
                                                   batch_size=config.batch_size,
-                                                  shuffle=True,
+                                                  shuffle=False,
                                                   num_workers=config.num_workers, pin_memory=True)
-
-    custom_loader_test = CMNIST.WholeDataLoader(config, istrain=False)
-    biased_test_loader = torch.utils.data.DataLoader(custom_loader_test,
-                                             batch_size=config.batch_size,
-                                             shuffle=True,
-                                             num_workers=config.num_workers, pin_memory=True)    
-    unbiased_test_loader = torch.utils.data.DataLoader(custom_loader_test,
-                                             batch_size=config.batch_size,
-                                             shuffle=True,
-                                             num_workers=config.num_workers, pin_memory=True)    
-
 
     print('Training debiased model')
     print('Config:', config)
 
-    model = models.simple_convnet()
+    in_dim = 8
+    hidden_dims = [32, 10]
+    model = models.simple_MLP(in_dim=in_dim, hidden_dims=hidden_dims, out_dim=config.n_class)
     model = model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1, verbose=True)
-    hook = Hook(model.avgpool, backward=False)
+    hook = Hook(model.for_hook, backward=False)
 
     def ce(outputs, labels, color_labels, weights):
-        return F.cross_entropy(outputs, labels)
+        return F.binary_cross_entropy_with_logits(outputs, labels)
 
     def ce_abs(outputs, labels, color_labels, weights):
         loss = ce(outputs, labels, color_labels, weights)
@@ -130,51 +166,59 @@ def main(config):
         train_acc, train_loss, train_bce, train_abs = train(model, train_loader, ce_abs, None, optimizer, scheduler=None)
         scheduler.step()
 
-        valid_acc, valid_loss = test(model, valid_loader, ce, None)
-        biased_test_acc, biased_test_loss = test(model, biased_test_loader, ce, None)
-        unbiased_test_acc, unbiased_test_loss = test(model, unbiased_test_loader, ce, None)
+        valid_acc, valid_loss, test_acc_p, test_acc_n, D = test(model, valid_loader, ce, None)
+        # print(valid_acc)
+
+        # biased_test_acc, biased_test_loss = test(model, biased_test_loader, ce, None)
+        # unbiased_test_acc, unbiased_test_loss = test(model, unbiased_test_loader, ce, None)
 
         print(f'Epoch {i} - Train acc: {train_acc:.4f}, train_loss: {train_loss:.4f} (bce: {train_bce:.4f} abs: {train_abs:.4f});')
         print(f'Valid acc {valid_acc:.4f}, loss: {valid_loss:.4f}')
-        print(f'Biased test acc: {biased_test_acc:.4f}, loss: {biased_test_loss:.4f}')
-        print(f'Unbiased test acc: {unbiased_test_acc:.4f}, loss: {unbiased_test_loss:.4f}')
+        # print(f'Biased test acc: {biased_test_acc:.4f}, loss: {biased_test_loss:.4f}')
+        # print(f'Unbiased test acc: {unbiased_test_acc:.4f}, loss: {unbiased_test_loss:.4f}')
 
         if valid_acc > best['valid_acc']:
             best = dict(
                 valid_acc = valid_acc,
-                biased_test_acc = biased_test_acc,
-                unbiased_test_acc = unbiased_test_acc
+                # biased_test_acc = biased_test_acc,
+                # unbiased_test_acc = unbiased_test_acc
             )
 
-    import datetime
-    import pandas as pd
-    def append_data_to_csv(data,csv_name):
-        df = pd.DataFrame(data)
-        if os.path.exists(csv_name):
-            df.to_csv(csv_name,mode='a',index=False,header=False)
-        else:
-            df.to_csv(csv_name,index=False)
-    import datetime
-    data = {
-        'Time': [datetime.datetime.now()],
-        'Var': [config.color_var],
-        'End': [biased_test_acc * 100]
-        }
-    # append_data_to_csv(data, os.path.join(self.exp_dir, 'CMNIST_End_trials.csv'))
-    append_data_to_csv(data, 'CMNIST_EnD_trials.csv')
+    # Output the mean AP for the best model on dev and test set
+    if config.bias_type == "I":
+        data = {
+            'Time': [datetime.datetime.now()],
+            'Bias': [opt['bias_attr']],
+            'Minority': [opt['minority']],
+            'Minority_size': [opt['minority_size']],
+            'Test_acc_old': [test_acc_p*100],
+            'Test_acc_young': [test_acc_n*100],
+            'D': [D*100],
+            }
+        utils.append_data_to_csv(data, 'Diabetes_EnD_I_trials.csv')
+    elif config.bias_type == "II":
+        data = {
+            'Time': [datetime.datetime.now()],
+            'Bias': [opt['bias_attr']],
+            'Train': [opt['Diabetes_train_mode']],
+            'Test': [opt['Diabetes_test_mode']],
+            'Test Acc': [valid_acc * 100]
+            }
+        utils.append_data_to_csv(data, 'Diabetes_EnD_II_trials.csv')
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('-e', '--exp_name', default='csad0020', help='experiment name')
     parser.add_argument('--color_var', default=0.0, type=float, help='variance for color distribution')
+    parser.add_argument('--load_path', default='/nas/vista-ssd01/users/jiazli/datasets/Diabetes/Diabetes_newData.csv')
     parser.add_argument('--checkpoint', default=None, help='checkpoint to resume')
     parser.add_argument('--random_seed', default=1, type=int, help='random seed')
     parser.add_argument('--lr_decay_period', default=3, type=int, help='lr decay period')
     parser.add_argument('--max_step', default=5, type=int, help='maximum step for training')
 
-    parser.add_argument('--n_class', default=10, type=int, help='number of classes')
-    parser.add_argument('--n_class_bias', default=8, type=int, help='number of bias classes')
+    parser.add_argument('--n_class', default=1, type=int, help='number of classes')
+    parser.add_argument('--n_class_bias', default=1, type=int, help='number of bias classes')
     parser.add_argument('--input_size', default=28, type=int, help='input size')
     parser.add_argument('--momentum', default=0.9, type=float, help='sgd momentum')
     parser.add_argument('--lr_decay_rate', default=0.1, type=float, help='lr decay rate')
@@ -183,8 +227,8 @@ if __name__ == '__main__':
     parser.add_argument('--alpha', default=0.1, type=float, help='EnD alpha')
     parser.add_argument('--beta', default=0.1, type=float, help='EnD beta')
     parser.add_argument('--weight_decay', default=1e-4, type=float, help='weight decay')
-    parser.add_argument('--batch_size', default=256, type=int, help='batch size')
-    parser.add_argument('--epochs', type=int, default=1)
+    parser.add_argument('--batch_size', default=32, type=int, help='batch size')
+    parser.add_argument('--epochs', type=int, default=26)
     parser.add_argument('--local', dest='local', action='store_true', help='disable wandb')    
     parser.add_argument('--rho', type=float, default=0.997, help='rho for biased mnist (.999, .997, .995, .990)')
 
@@ -200,6 +244,18 @@ if __name__ == '__main__':
     parser.add_argument('--cuda', default=True, help='enables cuda')
     parser.add_argument('-d', '--debug', action='store_true', help='debug mode')
     parser.add_argument('--is_train', default=1, type=int, help='whether it is training')
+
+    ## Census
+    parser.add_argument("--bias_attr", type=str, default='age', choices=['sex', 'race', 'age'])
+    parser.add_argument("--bias_type", type=str, default='I', choices=['I', 'II', 'General'])
+
+    # Type I Bias
+    parser.add_argument("--minority", type=str, default='young')
+    parser.add_argument("--minority_size", type=int, default=100)
+
+    # Type II Bias
+    parser.add_argument("--Diabetes_train_mode", type=str, default='eb1')
+    parser.add_argument("--Diabetes_test_mode", type=str, default='eb2')
 
     config = parser.parse_args()
     main(config)

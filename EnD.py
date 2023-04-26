@@ -38,7 +38,11 @@ def abs_orthogonal_blind(output, gram, target_labels, bias_labels):
     M_tot = 0.
 
     for bias_class in bias_classes:
-        bias_mask = (bias_labels == bias_class).type(torch.float).unsqueeze(dim=1)
+        bias_mask = (bias_labels == bias_class).type(torch.float)
+        if len(bias_mask.size()) < 2:
+            bias_mask = bias_mask.unsqueeze(dim=1)
+        # print(bias_mask.size())
+        # print('dajs')
         bias_mask = torch.tril(torch.mm(bias_mask, torch.transpose(bias_mask, 0, 1)), diagonal=-1)
         M = bias_mask.sum()
         M_tot += M
@@ -61,16 +65,22 @@ def abs_parallel(gram, target_labels, bias_labels):
     M_tot = 0.
 
     for target_class in target_classes:
-        class_mask = (target_labels == target_class).type(torch.float).unsqueeze(dim=1)
+        class_mask = (target_labels == target_class).type(torch.float)
+        if len(class_mask.size()) < 2:
+            class_mask = class_mask.unsqueeze(dim=1)
 
         for idx, bias_class in enumerate(bias_classes):
-            bias_mask = (bias_labels == bias_class).type(torch.float).unsqueeze(dim=1)
+            bias_mask = (bias_labels == bias_class).type(torch.float)
+            if len(bias_mask.size()) < 2:
+                bias_mask = bias_mask.unsqueeze(dim=1)
 
             for other_bias_class in bias_classes[idx:]:
                 if other_bias_class == bias_class:
                     continue
 
-                other_bias_mask = (bias_labels == other_bias_class).type(torch.float).unsqueeze(dim=1)
+                other_bias_mask = (bias_labels == other_bias_class).type(torch.float)
+                if len(other_bias_mask.size()) < 2:
+                    other_bias_mask = other_bias_mask.unsqueeze(dim=1)
                 mask = torch.tril(torch.mm(class_mask*bias_mask, torch.transpose(class_mask*other_bias_mask, 0, 1)), diagonal=-1)
                 M = mask.sum()
                 M_tot += M
@@ -89,6 +99,7 @@ def abs_regu(hook, target_labels, bias_labels, alpha=1.0, beta=1.0, sum=True):
     if len(D.size()) > 2:
         D = D.view(-1, np.prod((D.size()[1:])))
 
+    # print(D.size())
     gram_matrix = torch.tril(torch.mm(D, torch.transpose(D, 0, 1)), diagonal=-1)
     # not really needed, just for safety for approximate repr
     gram_matrix = torch.clamp(gram_matrix, -1, 1.)

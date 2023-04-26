@@ -1,8 +1,5 @@
 import torch
-import torchvision
-import math
 import torch.nn as nn
-import torch.nn.functional as F
 from EnD import pattern_norm
 
 
@@ -64,3 +61,30 @@ def simple_convnet():
         pattern_norm()
     )
     return model
+
+def simple_MLP(in_dim, hidden_dims, out_dim):
+    model = MLP(in_dim, hidden_dims, out_dim)
+    model.for_hook = nn.Sequential(
+        model.for_hook,
+        pattern_norm()
+    )
+    return model
+
+class MLP(nn.Module):
+    def __init__(self, in_dim, hidden_dims, out_dim):
+        super().__init__()
+        layers = []
+        for dim in hidden_dims:
+            layers.append(nn.Linear(in_dim, dim))
+            layers.append(nn.ReLU())
+            in_dim = dim
+        self.layers = nn.Sequential(*layers)
+        self.for_hook = nn.Linear(in_dim, in_dim)
+        self.out = nn.Linear(in_dim, out_dim)
+
+    def forward(self, x):
+        if len(x.size()) > 2:
+            x = x.view(x.size(0), -1)
+        x = self.layers(x)
+        x = self.for_hook(x)
+        return self.out(x)

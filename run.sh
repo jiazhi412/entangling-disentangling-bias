@@ -1,0 +1,1 @@
+python main_Diabetes.py --bias_type II --Diabetes_train_mode eb1 --Diabetes_test_mode eb2
